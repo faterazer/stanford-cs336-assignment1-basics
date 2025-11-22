@@ -31,7 +31,9 @@ def run_linear(
     from cs336_basics.transformer import Linear
     linear = Linear(d_in, d_out)
     linear.load_state_dict({"weight": weights})
-    return linear(in_features)
+    with torch.no_grad():
+        result = linear(in_features)
+    return result
 
 
 def run_embedding(
@@ -55,7 +57,9 @@ def run_embedding(
     from cs336_basics.transformer import Embedding
     embedding = Embedding(vocab_size, d_model)
     embedding.load_state_dict({"weight": weights})
-    return embedding(token_ids)
+    with torch.no_grad():
+        result = embedding(token_ids)
+    return result
 
 
 def run_swiglu(
@@ -87,7 +91,12 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    from cs336_basics.transformer import SwiGLUFFN
+    ffn = SwiGLUFFN(d_model, d_ff, device=in_features.device)
+    ffn.load_state_dict({"w1_3.weight": torch.cat((w1_weight, w3_weight), dim=0), "w2.weight": w2_weight})
+    with torch.no_grad():
+        result = ffn(in_features)
+    return result
 
 
 def run_scaled_dot_product_attention(

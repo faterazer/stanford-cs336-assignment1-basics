@@ -39,3 +39,15 @@ class RMSNorm(nn.Module):
         rms_inv = torch.rsqrt(mean_square + self.eps)
         result = x * rms_inv * self.weight
         return result.to(in_type)
+
+
+class SwiGLUFFN(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, device: torch.device = None, dtype: torch.dtype = None) -> None:
+        super().__init__()
+        self.w1_3 = Linear(d_model, 2 * d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(d_ff, d_model, device=device, dtype=dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w1_out, w3_out = torch.chunk(self.w1_3(x), 2, dim=-1)
+        hidden = w1_out * torch.sigmoid(w1_out) * w3_out
+        return self.w2(hidden)
