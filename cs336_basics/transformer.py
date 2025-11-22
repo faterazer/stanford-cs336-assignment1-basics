@@ -14,6 +14,7 @@ class Linear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x @ self.weight.T
 
+
 class Embedding(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int, device: torch.device = None, dtype: torch.dtype = None) -> None:
         super().__init__()
@@ -22,3 +23,19 @@ class Embedding(nn.Module):
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.weight[token_ids]
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device: torch.device = None, dtype: torch.dtype = None) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones((d_model,), device=device, dtype=dtype))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (batch_size, sequence_length, d_model)
+        in_type = x.dtype
+        x = x.to(torch.float32)
+        mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+        rms_inv = torch.rsqrt(mean_square + self.eps)
+        result = x * rms_inv * self.weight
+        return result.to(in_type)
