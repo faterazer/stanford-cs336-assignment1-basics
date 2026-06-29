@@ -78,6 +78,9 @@ class RotaryPositionalEmbedding(nn.Module):
         (x_0, x_1), (x_2, x_3), ...
     """
 
+    cos_cached: torch.Tensor
+    sin_cached: torch.Tensor
+
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None) -> None:
         super().__init__()
 
