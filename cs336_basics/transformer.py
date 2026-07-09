@@ -1,7 +1,7 @@
 import math
 
 import torch
-from torch import nn
+from torch import nn, Tensor
 
 
 class Linear(nn.Module):
@@ -128,3 +128,83 @@ class RotaryPositionalEmbedding(nn.Module):
         out_even = x_even * rope_cos - x_odd * rope_sin
         out_odd = x_odd * rope_cos + x_even * rope_sin
         return torch.stack((out_even, out_odd), dim=-1).flatten(-2).to(in_type)
+
+
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    in_type = x.dtype
+    x = x.to(torch.float32)
+    max_val = x.amax(dim=dim, keepdim=True)
+    x = x - max_val
+    x_exp = x.exp()
+    x_out = x_exp / torch.sum(x_exp, dim=dim, keepdim=True)
+    return x_out.to(in_type)
+
+
+def scaled_dot_product_attention(
+    query: Tensor, key: Tensor, value: Tensor, attn_mask: Tensor | None = None, scale: float | None = None
+) -> Tensor:
+    """
+    Compute the scaled dot product attention.
+
+    Args:
+        query (Tensor): The query tensor of shape (batch_size, ..., seq_len, embed_dim).
+        key (Tensor): The key tensor of shape (batch_size, ..., seq_len, embed_dim).
+        value (Tensor): The value tensor of shape (batch_size, ..., seq_len, embed_dim).
+        attn_mask (Optional[Tensor]): The attention mask tensor of shape (..., seq_len, seq_len).
+        scale (Optional[float]): The scale factor for the dot product. If None, it defaults to 1 / sqrt(embed_dim).
+
+    Returns:
+        Tensor: The tensor of shape (batch_size, ..., seq_len, embed_dim).
+    """
+    scale_factor = 1 / math.sqrt(query.shape[-1]) if scale is None else scale
+    attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
+    if attn_mask is not None:
+        attn_scores.masked_fill_(attn_mask.logical_not(), float("-inf"))
+    attn_weights = softmax(attn_scores, dim=-1)
+    outputs = torch.matmul(attn_weights, value)
+    return outputs
+
+
+class CausalMultiHeadSelfAttention(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        rope: RotaryPositionalEmbedding | None = None,
+        device: torch.device | None = None,
+    ) -> None:
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError(f"Expected d_model % num_heads == 0, got d_model = {d_model}, num_heads = {num_heads}.")
+        if rope is not None and rope.d_k != d_model // num_heads:
+            raise ValueError(
+                f"Expected rope.d_k == d_model // num_heads, got rope.d_k = {rope.d_k}, d_model // num_heads = {d_model // num_heads}."
+            )
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.rope = rope
+        self.qkv_proj = Linear(d_model, d_model * 3, device=device)
+        self.out_proj = Linear(d_model, d_model, device=device)
+
+    def forward(self, x: Tensor, token_positions: Tensor | None = None) -> Tensor:
+        prefix_shape, seq_len = x.shape[:-2], x.shape[-2]
+        qkv = self.qkv_proj(x)
+
+        # (..., seq_len, d_model) -> (..., num_heads, seq_len, d_model // num_heads)
+        query, key, value = qkv.chunk(3, dim=-1)
+        query = query.reshape(*prefix_shape, seq_len, self.num_heads, -1).transpose(-2, -3)
+        key = key.reshape(*prefix_shape, seq_len, self.num_heads, -1).transpose(-2, -3)
+        value = value.reshape(*prefix_shape, seq_len, self.num_heads, -1).transpose(-2, -3)
+
+        if self.rope is not None:
+            query = self.rope(query, token_positions)
+            key = self.rope(key, token_positions)
+
+        pos = torch.arange(seq_len, device=x.device)
+        causal_mask = pos[None, :] <= pos[:, None]
+        outputs = scaled_dot_product_attention(query, key, value, causal_mask)
+        outputs = outputs.transpose(-2, -3)
+        outputs = outputs.reshape(*prefix_shape, seq_len, self.d_model)
+        outputs = self.out_proj(outputs)
+        return outputs
