@@ -95,7 +95,7 @@ def run_swiglu(
     # swiglu.w3.weight.data = w3_weight
     from cs336_basics.transformer import SwiGLUFFN
 
-    ffn = SwiGLUFFN(d_model, d_ff, device=in_features.device)
+    ffn = SwiGLUFFN(d_model, d_ff)
     ffn.load_state_dict({"w1_3.weight": torch.cat((w1_weight, w3_weight), dim=0), "w2.weight": w2_weight})
     with torch.no_grad():
         result = ffn(in_features)
@@ -158,7 +158,7 @@ def run_multihead_self_attention(
     """
     from cs336_basics.transformer import CausalMultiHeadSelfAttention
 
-    attn = CausalMultiHeadSelfAttention(d_model, num_heads, device=in_features.device)
+    attn = CausalMultiHeadSelfAttention(d_model, num_heads)
     qkv_proj_weight = torch.concat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0)
     state = {
         "qkv_proj.weight": qkv_proj_weight,
@@ -208,7 +208,7 @@ def run_multihead_self_attention_with_rope(
     from cs336_basics.transformer import CausalMultiHeadSelfAttention, RotaryPositionalEmbedding
 
     rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=in_features.device)
-    attn = CausalMultiHeadSelfAttention(d_model, num_heads, rope=rope, device=in_features.device)
+    attn = CausalMultiHeadSelfAttention(d_model, num_heads, rope=rope)
     qkv_proj_weight = torch.concat((q_proj_weight, k_proj_weight, v_proj_weight), dim=0)
     state = {
         "qkv_proj.weight": qkv_proj_weight,
@@ -313,7 +313,25 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.transformer import TransformerBlock, RotaryPositionalEmbedding
+
+    rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=in_features.device)
+    block = TransformerBlock(d_model, num_heads, d_ff, rope)
+    qkv_weight = torch.concat(
+        (weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"]), dim=0
+    )
+    ffn_w1_3_weight = torch.concat((weights["ffn.w1.weight"], weights["ffn.w3.weight"]), dim=0)
+    state_dict = {
+        "norm1.weight": weights["ln1.weight"],
+        "norm2.weight": weights["ln2.weight"],
+        "causal_attention.qkv_proj.weight": qkv_weight,
+        "causal_attention.out_proj.weight": weights["attn.output_proj.weight"],
+        "ffn.w1_3.weight": ffn_w1_3_weight,
+        "ffn.w2.weight": weights["ffn.w2.weight"],
+    }
+    block.load_state_dict(state_dict)
+    token_positions = torch.arange(in_features.shape[-2], device=in_features.device)
+    return block(in_features, token_positions)
 
 
 def run_transformer_lm(
@@ -395,7 +413,34 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.transformer import CausalTransformerLM
+
+    clm = CausalTransformerLM(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
+
+    state_dict = {"token_embeddings.weight": weights["token_embeddings.weight"]}
+    for i, layer in enumerate(clm.layers):
+        state_dict[f"layers.{i}.norm1.weight"] = weights[f"layers.{i}.ln1.weight"]
+        state_dict[f"layers.{i}.norm2.weight"] = weights[f"layers.{i}.ln2.weight"]
+        qkv_weight = torch.concat(
+            (
+                weights[f"layers.{i}.attn.q_proj.weight"],
+                weights[f"layers.{i}.attn.k_proj.weight"],
+                weights[f"layers.{i}.attn.v_proj.weight"],
+            ),
+            dim=0,
+        )
+        state_dict[f"layers.{i}.causal_attention.qkv_proj.weight"] = qkv_weight
+        state_dict[f"layers.{i}.causal_attention.out_proj.weight"] = weights[f"layers.{i}.attn.output_proj.weight"]
+        ffn_w1_3_weight = torch.concat(
+            (weights[f"layers.{i}.ffn.w1.weight"], weights[f"layers.{i}.ffn.w3.weight"]), dim=0
+        )
+        state_dict[f"layers.{i}.ffn.w1_3.weight"] = ffn_w1_3_weight
+        state_dict[f"layers.{i}.ffn.w2.weight"] = weights[f"layers.{i}.ffn.w2.weight"]
+    state_dict["norm_final.weight"] = weights["ln_final.weight"]
+    state_dict["lm_head.weight"] = weights["lm_head.weight"]
+    clm.load_state_dict(state_dict)
+
+    return clm(in_indices)
 
 
 def run_rmsnorm(

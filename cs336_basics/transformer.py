@@ -52,12 +52,10 @@ class RMSNorm(nn.Module):
 
 
 class SwiGLUFFN(nn.Module):
-    def __init__(
-        self, d_model: int, d_ff: int, device: torch.device | None = None, dtype: torch.dtype | None = None
-    ) -> None:
+    def __init__(self, d_model: int, d_ff: int) -> None:
         super().__init__()
-        self.w1_3 = Linear(d_model, 2 * d_ff, device=device, dtype=dtype)
-        self.w2 = Linear(d_ff, d_model, device=device, dtype=dtype)
+        self.w1_3 = Linear(d_model, 2 * d_ff)
+        self.w2 = Linear(d_ff, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         w1_out, w3_out = torch.chunk(self.w1_3(x), 2, dim=-1)
@@ -166,13 +164,7 @@ def scaled_dot_product_attention(
 
 
 class CausalMultiHeadSelfAttention(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
-        rope: RotaryPositionalEmbedding | None = None,
-        device: torch.device | None = None,
-    ) -> None:
+    def __init__(self, d_model: int, num_heads: int, rope: RotaryPositionalEmbedding | None = None) -> None:
         super().__init__()
         if d_model % num_heads != 0:
             raise ValueError(f"Expected d_model % num_heads == 0, got d_model = {d_model}, num_heads = {num_heads}.")
@@ -184,8 +176,8 @@ class CausalMultiHeadSelfAttention(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         self.rope = rope
-        self.qkv_proj = Linear(d_model, d_model * 3, device=device)
-        self.out_proj = Linear(d_model, d_model, device=device)
+        self.qkv_proj = Linear(d_model, d_model * 3)
+        self.out_proj = Linear(d_model, d_model)
 
     def forward(self, x: Tensor, token_positions: Tensor | None = None) -> Tensor:
         prefix_shape, seq_len = x.shape[:-2], x.shape[-2]
@@ -198,6 +190,8 @@ class CausalMultiHeadSelfAttention(nn.Module):
         value = value.reshape(*prefix_shape, seq_len, self.num_heads, -1).transpose(-2, -3)
 
         if self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(seq_len, device=x.device)
             query = self.rope(query, token_positions)
             key = self.rope(key, token_positions)
 
@@ -208,3 +202,53 @@ class CausalMultiHeadSelfAttention(nn.Module):
         outputs = outputs.reshape(*prefix_shape, seq_len, self.d_model)
         outputs = self.out_proj(outputs)
         return outputs
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, rope: RotaryPositionalEmbedding) -> None:
+        super().__init__()
+
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
+        self.causal_attention = CausalMultiHeadSelfAttention(d_model, num_heads, rope=rope)
+        self.ffn = SwiGLUFFN(d_model, d_ff)
+
+    def forward(self, x: Tensor, token_positions: Tensor | None = None) -> Tensor:
+        y = self.norm1(x)
+        y = self.causal_attention(y, token_positions)
+        x = x + y
+
+        y = self.norm2(x)
+        y = self.ffn(y)
+        x = x + y
+        return x
+
+
+class CausalTransformerLM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+    ) -> None:
+        super().__init__()
+
+        self.token_embeddings = Embedding(vocab_size, d_model)
+        rope = RotaryPositionalEmbedding(rope_theta, d_model // num_heads, context_length)
+        self.layers = nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, rope) for _ in range(num_layers)])
+        self.norm_final = RMSNorm(d_model)
+        self.lm_head = Linear(d_model, vocab_size)
+
+    def forward(self, token_ids: Tensor, token_positions: Tensor | None = None) -> Tensor:
+        x = self.token_embeddings(token_ids)
+        if token_positions is None:
+            token_positions = torch.arange(token_ids.shape[-1], device=x.device)
+        for layer in self.layers:
+            x = layer(x, token_positions)
+        x = self.norm_final(x)
+        x = self.lm_head(x)
+        return x
